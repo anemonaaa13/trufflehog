@@ -151,7 +151,7 @@ func (s Scanner) FromData(ctx context.Context, verify bool, data []byte) ([]dete
 			DetectorType: detector_typepb.DetectorType_AdobeIMS,
 			Raw:          []byte(c.token),
 			ExtraData: map[string]string{
-				"token_type": c.tokenType,
+				"token_type": payload.Type,
 				"user_id":    payload.UserID,
 				"client_id":  payload.ClientID,
 				"as":         payload.AuthorizationServer,
