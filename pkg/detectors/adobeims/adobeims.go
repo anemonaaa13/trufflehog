@@ -163,24 +163,11 @@ func (s Scanner) FromData(ctx context.Context, verify bool, data []byte) ([]dete
 			client := s.getClient()
 			baseURL := imsBaseURL(payload.AuthorizationServer)
 
-			// Step 1: confirm the token is still active via /ims/validate_token/v1.
+			// confirm the token is still active via /ims/validate_token/v1.
 			isVerified, verifyErr := validateToken(ctx, client, baseURL, c.token, payload)
 			result.Verified = isVerified
 			result.SetVerificationError(verifyErr, c.token)
 
-			// Step 2: for valid access tokens only, fetch user info from /ims/userinfo/v2.
-			// Refresh tokens do not have a userinfo endpoint.
-			if isVerified && c.tokenType == "access_token" {
-				userInfo, uErr := getUserInfo(ctx, client, baseURL, c.token)
-				if uErr != nil {
-					result.SetVerificationError(uErr, c.token)
-				} else {
-					// Merge userinfo fields into ExtraData.
-					for k, v := range userInfo {
-						result.ExtraData[k] = v
-					}
-				}
-			}
 		}
 
 		results = append(results, result)
@@ -250,47 +237,3 @@ func validateToken(ctx context.Context, client *http.Client, baseURL, token stri
 }
 
 
-func getUserInfo(ctx context.Context, client *http.Client, baseURL, token string) (map[string]string, error) {
-	endpoint := baseURL + "/ims/userinfo/v2"
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-	}()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status %d from userinfo", resp.StatusCode)
-	}
-
-	var info struct {
-		Sub         string `json:"sub"`          // unique user identifier 
-		Email       string `json:"email"`       
-		Name        string `json:"name"`        
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
-		return nil, fmt.Errorf("failed to decode userinfo response: %w", err)
-	}
-
-	extra := map[string]string{}
-	if info.Sub != "" {
-		extra["sub"] = info.Sub
-	}
-	if info.Email != "" {
-		extra["email"] = info.Email
-	}
-	if info.Name != "" {
-		extra["name"] = info.Name
-	}
-
-	return extra, nil
-}

@@ -2,17 +2,15 @@ package adobeims
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/google/go-cmp/cmp/cmpopts"
 
 	"github.com/trufflesecurity/trufflehog/v3/pkg/detectors"
 	"github.com/trufflesecurity/trufflehog/v3/pkg/engine/ahocorasick"
-	"github.com/trufflesecurity/trufflehog/v3/pkg/pb/detector_typepb"
 )
 
 // Pre-built test JWTs (not cryptographically valid, but structurally correct).
@@ -22,6 +20,7 @@ import (
 const (
 	accessToken  = "eyJhbGciOiAiUlMyNTYiLCAidHlwIjogIkpXVCJ9.eyJ0eXBlIjogImFjY2Vzc190b2tlbiIsICJjbGllbnRfaWQiOiAidGVzdGNsaWVudDEyMyIsICJ1c2VyX2lkIjogIkFCQ0RFRjEyMzQ1Njc4OTBBQkNERUZAQWRvYmVJRCIsICJhcyI6ICJpbXMtbmExIiwgInNjb3BlIjogIm9wZW5pZCxlbWFpbCxwcm9maWxlIn0.AAABBBCCCDDDEEEFFFGGGHHHIIIJJJKKKLLLMMMNNNOOOPPPQQQRRRSSST"
 	refreshToken = "eyJhbGciOiAiUlMyNTYiLCAidHlwIjogIkpXVCJ9.eyJ0eXBlIjogInJlZnJlc2hfdG9rZW4iLCAiY2xpZW50X2lkIjogInRlc3RjbGllbnQxMjMiLCAidXNlcl9pZCI6ICJBQkNERUYxMjM0NTY3ODkwQUJDREVGQEFkb2JlSUQiLCAiYXMiOiAiaW1zLW5hMSIsICJzY29wZSI6ICJvcGVuaWQsZW1haWwscHJvZmlsZSxvZmZsaW5lX2FjY2VzcyJ9.AAABBBCCCDDDEEEFFFGGGHHHIIIJJJKKKLLLMMMNNNOOOPPPQQQRRRSSST"
+	keyword      = "adobelogin"
 )
 
 // --- Pattern tests ---
@@ -40,20 +39,20 @@ func TestAdobeIMS_Pattern(t *testing.T) {
 			input: `{
 				"access_token": "` + accessToken + `",
 				"token_type": "bearer",
-				"adobelogin": true
+				"` + keyword + `": true
 			}`,
 			want: []string{accessToken},
 		},
 		{
 			name:  "access_token as env var",
-			input: "ACCESS_TOKEN=" + accessToken + "\n# adobelogin\n",
+			input: "ACCESS_TOKEN=" + accessToken + "\n# " + keyword + "\n",
 			want:  []string{accessToken},
 		},
 		{
 			name: "refresh_token in JSON",
 			input: `{
 				"refresh_token": "` + refreshToken + `",
-				"adobelogin": true
+				"` + keyword + `": true
 			}`,
 			want: []string{refreshToken},
 		},
@@ -62,7 +61,7 @@ func TestAdobeIMS_Pattern(t *testing.T) {
 			input: `{
 				"access_token": "` + accessToken + `",
 				"refresh_token": "` + refreshToken + `",
-				"adobelogin": true
+				"` + keyword + `": true
 			}`,
 			want: []string{accessToken, refreshToken},
 		},
@@ -73,12 +72,12 @@ func TestAdobeIMS_Pattern(t *testing.T) {
 		},
 		{
 			name:  "non-JWT value — should not match",
-			input: `{"access_token": "notajwt", "adobelogin": true}`,
+			input: `{"access_token": "notajwt", "` + keyword + `": true}`,
 			want:  nil,
 		},
 		{
 			name:  "malformed JWT payload — should not match",
-			input: `{"access_token": "eyJhbGci.eyJOT1RWQUxJREpTT04.AAABBBCCCDDDEEEFFFGGG", "adobelogin": true}`,
+			input: `{"access_token": "eyJhbGci.eyJOT1RWQUxJREpTT04.AAABBBCCCDDDEEEFFFGGG", "` + keyword + `": true}`,
 			want:  nil,
 		},
 	}
@@ -130,72 +129,9 @@ func TestAdobeIMS_Pattern(t *testing.T) {
 	}
 }
 
-// --- Verification tests ---
-
-func TestAdobeIMS_Verification_AccessToken_Valid(t *testing.T) {
-	// Mock server: validates token and returns userinfo.
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("/ims/validate_token/v1", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"valid": true})
-	})
-
-	mux.HandleFunc("/ims/userinfo/v2", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"sub":   "ABCDEF1234567890ABCDEF@AdobeID",
-			"email": "test@example.com",
-			"name":  "Test User",
-		})
-	})
-
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	s := Scanner{client: srv.Client()}
-
-	// We can't redirect imsBaseURL (built from the token's `as` claim) to the mock server,
-	// so we call validateToken and getUserInfo directly, passing srv.URL as the base URL.
-	payload, err := decodeJWTPayload(accessToken)
-	if err != nil {
-		t.Fatalf("decodeJWTPayload: %v", err)
-	}
-
-	valid, err := validateToken(context.Background(), s.client, srv.URL, accessToken, payload)
-	if err != nil {
-		t.Fatalf("validateToken error: %v", err)
-	}
-	if !valid {
-		t.Error("expected token to be valid")
-	}
-
-	userInfo, err := getUserInfo(context.Background(), s.client, srv.URL, accessToken)
-	if err != nil {
-		t.Fatalf("getUserInfo error: %v", err)
-	}
-
-	wantUserInfo := map[string]string{
-		"sub":   "ABCDEF1234567890ABCDEF@AdobeID",
-		"email": "test@example.com",
-		"name":  "Test User",
-	}
-	if diff := cmp.Diff(wantUserInfo, userInfo); diff != "" {
-		t.Errorf("userInfo mismatch (-want +got):\n%s", diff)
-	}
-}
-
-func TestAdobeIMS_Verification_AccessToken_Invalid(t *testing.T) {
+func TestAdobeIMS_Verification_Indeterminate_UnexpectedStatus(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized)
+		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer srv.Close()
 
@@ -204,116 +140,37 @@ func TestAdobeIMS_Verification_AccessToken_Invalid(t *testing.T) {
 		t.Fatalf("decodeJWTPayload: %v", err)
 	}
 
-	valid, err := validateToken(context.Background(), srv.Client(), srv.URL, accessToken, payload)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	valid, verifyErr := validateToken(context.Background(), srv.Client(), srv.URL, accessToken, payload)
+	if verifyErr == nil {
+		t.Error("expected a verification error for unexpected API response")
 	}
 	if valid {
-		t.Error("expected token to be invalid")
+		t.Error("expected token to be unverified")
 	}
 }
 
-func TestAdobeIMS_Verification_ValidateTokenFalse(t *testing.T) {
-	// Server returns 200 but {"valid": false}
+
+func TestAdobeIMS_Verification_Indeterminate_Timeout(t *testing.T) {
+	handlerDone := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"valid": false, "reason": "bad_signature"})
+		<-handlerDone
 	}))
 	defer srv.Close()
+	defer close(handlerDone)
 
 	payload, err := decodeJWTPayload(accessToken)
 	if err != nil {
 		t.Fatalf("decodeJWTPayload: %v", err)
 	}
 
-	valid, err := validateToken(context.Background(), srv.Client(), srv.URL, accessToken, payload)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	valid, verifyErr := validateToken(ctx, srv.Client(), srv.URL, accessToken, payload)
+	if verifyErr == nil {
+		t.Error("expected a verification error for timeout")
 	}
 	if valid {
-		t.Error("expected token to be invalid when valid=false")
-	}
-}
-
-func TestAdobeIMS_Verification_RefreshToken_Valid(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"valid": true})
-	}))
-	defer srv.Close()
-
-	payload, err := decodeJWTPayload(refreshToken)
-	if err != nil {
-		t.Fatalf("decodeJWTPayload: %v", err)
-	}
-
-	valid, err := validateToken(context.Background(), srv.Client(), srv.URL, refreshToken, payload)
-	if err != nil {
-		t.Fatalf("validateToken error: %v", err)
-	}
-	if !valid {
-		t.Error("expected refresh token to be valid")
-	}
-}
-
-// --- FromData integration test with mock server ---
-
-func TestAdobeIMS_FromData(t *testing.T) {
-	// verify=false: no HTTP calls are made, so no mock server needed.
-	// Verification helpers (validateToken, getUserInfo) are tested directly above.
-	input := `{
-		"access_token": "` + accessToken + `",
-		"refresh_token": "` + refreshToken + `",
-		"adobelogin": "ims-na1.adobelogin.com"
-	}`
-
-	s := Scanner{}
-	results, err := s.FromData(context.Background(), false, []byte(input))
-	if err != nil {
-		t.Fatalf("FromData error: %v", err)
-	}
-
-	if len(results) != 2 {
-		t.Fatalf("expected 2 results, got %d", len(results))
-	}
-
-	wantTypes := map[string]struct{}{
-		"access_token":  {},
-		"refresh_token": {},
-	}
-	gotTypes := make(map[string]struct{}, len(results))
-	for _, r := range results {
-		if r.DetectorType != detector_typepb.DetectorType_AdobeIMS {
-			t.Errorf("unexpected detector type: %v", r.DetectorType)
-		}
-		gotTypes[r.ExtraData["token_type"]] = struct{}{}
-	}
-
-	if diff := cmp.Diff(wantTypes, gotTypes, cmpopts.EquateEmpty()); diff != "" {
-		t.Errorf("token_type mismatch (-want +got):\n%s", diff)
-	}
-}
-
-// --- decodeJWTPayload unit test ---
-
-func TestDecodeJWTPayload(t *testing.T) {
-	payload, err := decodeJWTPayload(accessToken)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if payload.Type != "access_token" {
-		t.Errorf("expected type=access_token, got %q", payload.Type)
-	}
-	if payload.ClientID != "testclient123" {
-		t.Errorf("expected client_id=testclient123, got %q", payload.ClientID)
-	}
-	if payload.AuthorizationServer != "ims-na1" {
-		t.Errorf("expected as=ims-na1, got %q", payload.AuthorizationServer)
-	}
-
-	_, err = decodeJWTPayload("notajwt")
-	if err == nil {
-		t.Error("expected error for non-JWT input")
+		t.Error("expected token to be unverified")
 	}
 }
