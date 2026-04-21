@@ -29,13 +29,13 @@ var (
 
 	defaultClient = common.SaneHttpClient()
 
-	accessTokenPat = regexp.MustCompile(`(?i)access_token["'\s]*[:=]["'\s]*(eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})`)
-	refreshTokenPat = regexp.MustCompile(`(?i)refresh_token["'\s]*[:=]["'\s]*(eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})`)
+	// Matches any JWT; Adobe IMS tokens are identified by decoding the payload and checking the "as" field.
+	jwtPat = regexp.MustCompile(`(eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})`)
 )
 
 
 func (s Scanner) Keywords() []string {
-	return []string{"adobelogin"}
+	return []string{"eyJ"}
 }
 
 
@@ -51,10 +51,8 @@ func (s Scanner) Description() string {
 
 type jwtPayload struct {
 	Type                string `json:"type"`       // "access_token" or "refresh_token"
-	ClientID            string `json:"client_id"`  
-	UserID              string `json:"user_id"`    
+	ClientID            string `json:"client_id"`
 	AuthorizationServer string `json:"as"`         // IMS region, e.g. "ims-na1", "ims-eu1"
-	Scope               string `json:"scope"`      // comma-separated list of granted scopes
 }
 
 
@@ -93,12 +91,8 @@ func decodeJWTPayload(token string) (*jwtPayload, error) {
 
 
 func imsBaseURL(as string) string {
-	if as != "" {
-		return fmt.Sprintf("https://%s.adobelogin.com", as)
-	}
-	return "https://ims-na1.adobelogin.com"
+	return fmt.Sprintf("https://%s.adobelogin.com", as)
 }
-
 
 func (s Scanner) getClient() *http.Client {
 	if s.client != nil {
@@ -115,59 +109,39 @@ func (s Scanner) FromData(ctx context.Context, verify bool, data []byte) ([]dete
 	// seen prevents the same JWT from being reported twice
 	seen := make(map[string]struct{})
 
-	type candidate struct {
-		token     string
-		tokenType string // "access_token" or "refresh_token"
-	}
-
-	var candidates []candidate
-
-	for _, m := range accessTokenPat.FindAllStringSubmatch(dataStr, -1) {
-		tok := m[1] // m[0] is the full match, m[1] is the captured JWT
-		if _, ok := seen[tok]; !ok {
-			seen[tok] = struct{}{}
-			candidates = append(candidates, candidate{tok, "access_token"})
-		}
-	}
-
-	for _, m := range refreshTokenPat.FindAllStringSubmatch(dataStr, -1) {
+	for _, m := range jwtPat.FindAllStringSubmatch(dataStr, -1) {
 		tok := m[1]
-		if _, ok := seen[tok]; !ok {
-			seen[tok] = struct{}{}
-			candidates = append(candidates, candidate{tok, "refresh_token"})
+		if _, ok := seen[tok]; ok {
+			continue
 		}
-	}
+		seen[tok] = struct{}{}
 
-	for _, c := range candidates {
-		payload, err := decodeJWTPayload(c.token)
+		payload, err := decodeJWTPayload(tok)
 		if err != nil {
-			// Not a structurally valid JWT — skip it silently.
 			continue
 		}
 
-		// Build the result with information already available from the JWT payload.
-		// This is reported even if verification is disabled or fails.
+		// Adobe IMS tokens are identified by the "as" field (e.g. "ims-na1", "ims-eu1").
+		if !strings.HasPrefix(payload.AuthorizationServer, "ims-") {
+			continue
+		}
+
 		result := detectors.Result{
 			DetectorType: detector_typepb.DetectorType_AdobeIMS,
-			Raw:          []byte(c.token),
+			Raw:          []byte(tok),
 			ExtraData: map[string]string{
 				"token_type": payload.Type,
-				"user_id":    payload.UserID,
 				"client_id":  payload.ClientID,
 				"as":         payload.AuthorizationServer,
-				"scope":      payload.Scope,
 			},
 		}
 
 		if verify {
 			client := s.getClient()
 			baseURL := imsBaseURL(payload.AuthorizationServer)
-
-			// confirm the token is still active via /ims/validate_token/v1.
-			isVerified, verifyErr := validateToken(ctx, client, baseURL, c.token, payload)
+			isVerified, verifyErr := validateToken(ctx, client, baseURL, tok, payload)
 			result.Verified = isVerified
-			result.SetVerificationError(verifyErr, c.token)
-
+			result.SetVerificationError(verifyErr, tok)
 		}
 
 		results = append(results, result)
@@ -206,11 +180,12 @@ func validateToken(ctx context.Context, client *http.Client, baseURL, token stri
 
 	// Send the request to Adobe
 	resp, err := client.Do(req)
+	if resp != nil {
+		defer resp.Body.Close()
+	}
 	if err != nil {
 		return false, err
 	}
-
-	defer resp.Body.Close()
 
 	// Read the full response body into memory.
 	body, err := io.ReadAll(resp.Body)
