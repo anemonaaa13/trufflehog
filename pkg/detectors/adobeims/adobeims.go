@@ -213,6 +213,9 @@ func validateToken(ctx context.Context, client *http.Client, baseURL, token stri
 	case http.StatusUnauthorized, http.StatusForbidden, http.StatusBadRequest:
 		return false, nil
 
+	case http.StatusTooManyRequests:
+		return false, fmt.Errorf("rate limited by Adobe IMS validate_token")
+
 	default:
 		return false, fmt.Errorf("unexpected status %d from validate_token", resp.StatusCode)
 	}
