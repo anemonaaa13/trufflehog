@@ -22,7 +22,12 @@ type Scanner struct {
 }
 
 
-var _ detectors.Detector = (*Scanner)(nil)
+var _ interface {
+	detectors.Detector
+	detectors.MaxSecretSizeProvider
+} = (*Scanner)(nil)
+
+func (s Scanner) MaxSecretSize() int64 { return 4096 }
 
 
 var (
