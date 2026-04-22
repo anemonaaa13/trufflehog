@@ -210,7 +210,7 @@ func validateToken(ctx context.Context, client *http.Client, baseURL, token stri
 		}
 		return result.Valid, nil
 
-	case http.StatusUnauthorized, http.StatusForbidden:
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusBadRequest:
 		return false, nil
 
 	default:
