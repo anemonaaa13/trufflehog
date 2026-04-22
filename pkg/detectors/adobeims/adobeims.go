@@ -122,7 +122,7 @@ func (s Scanner) FromData(ctx context.Context, verify bool, data []byte) ([]dete
 		}
 
 		// Adobe IMS tokens are identified by the "as" field (e.g. "ims-na1", "ims-eu1").
-		if !strings.HasPrefix(payload.AuthorizationServer, "ims-") {
+		if !strings.HasPrefix(payload.AuthorizationServer, "ims-") || payload.ClientID == "" || payload.Type == "" {
 			continue
 		}
 
